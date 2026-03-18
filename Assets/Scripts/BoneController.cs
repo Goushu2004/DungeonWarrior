@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using Unity.VisualScripting;
 using UnityEngine;
 using UnityEngine.AI;
 
@@ -21,9 +22,11 @@ public class BoneController : MonoBehaviour,  IDamageable
     public Transform rayStart;
     public Transform rayEnd;
     public float radius = 0.2f;
-    public LayerMask targetMask;
+   private LayerMask targetMask;
     private List<GameObject> hitTargets = new List<GameObject>();
     private bool startDetectCollision = false;
+    public int attackSymbol = 1;
+    private string attackTriggerName = "";
     private enum BoneState
     {
         Chasing,
@@ -33,7 +36,15 @@ public class BoneController : MonoBehaviour,  IDamageable
     private BoneState currentState = BoneState.Chasing;
     private float lastAttackTime = 0f;
     private float attackCoolDown = 2f;
-    // start is called once before the first execution of Update after the MonoBehaviour is created
+    private GameObject player;
+    private Animator playerAnimator;
+    private AudioSource playerAudioSource;
+    private AudioSource enemytAudioSource;
+    public AudioClip blockClip;
+    public AudioClip slashClip;
+    public AudioClip deathClip;
+    public AudioClip screamClip;
+    // startis called once before the first execution of Update after the MonoBehaviour is created
     void Start()
     {
         rb = GetComponent<Rigidbody>();
@@ -42,6 +53,11 @@ public class BoneController : MonoBehaviour,  IDamageable
         agent = GetComponent<NavMeshAgent>();
         agent.enabled = false;
         StartCoroutine(BoneStateRuntine());
+        targetMask = LayerMask.GetMask("Player","Shield");
+        player = GameObject.FindGameObjectWithTag("Player");
+        playerAnimator = player.GetComponent<Animator>();
+        playerAudioSource = player.GetComponent<AudioSource>();
+        enemytAudioSource = GetComponent<AudioSource>();
     }
 
     // Update is called once per frame
@@ -57,6 +73,13 @@ public class BoneController : MonoBehaviour,  IDamageable
             DetectCollision();
         }
         StepClimb();
+        //攻击符号重置
+        if (attackSymbol > 2||Time.time - lastAttackTime > 4) 
+        {
+            attackSymbol = 1;
+        }
+        //更新攻击触发器名称
+        attackTriggerName = "attack_trigger" + attackSymbol;
     }
     void FixedUpdate() 
     {
@@ -78,8 +101,9 @@ public class BoneController : MonoBehaviour,  IDamageable
         yield return new WaitForSeconds(1f);
         Destroy(gameObject);
     }
-    void IDamageable.TakeDamage(float amount)
+    void IDamageable.TakeDamage(float amount,Transform transform)
     {
+        StartCoroutine(SmoothLookAt(transform.position));
         animator.SetTrigger("damage_trigger");
         health -= (int)amount;
         if (health <= 0)
@@ -109,11 +133,11 @@ public class BoneController : MonoBehaviour,  IDamageable
         float climbSmooth = 5f;
         //低射线检测
         RaycastHit hitLower;
-        if (Physics.Raycast(stepCheakPoint, transform.forward, out hitLower, 0.1f))
+        if (Physics.Raycast(stepCheakPoint, transform.forward, out hitLower, 0.5f))
         {
             //高射线检测
             RaycastHit hitupper;
-            if (!Physics.Raycast(stepCheakPoint + new Vector3(0, stepHeight, 0), transform.forward, out hitupper, 0.5f))
+            if (!Physics.Raycast(stepCheakPoint + new Vector3(0, stepHeight, 0), transform.forward, out hitupper, 1f))
             {
                 rb.position += new Vector3(0, climbSmooth * Time.deltaTime, 0);
             }
@@ -152,8 +176,9 @@ public class BoneController : MonoBehaviour,  IDamageable
                     {
                         lastAttackTime = Time.time;
                         animator.SetFloat("speed", 0);
-                        hitTargets.Clear();
-                        animator.SetTrigger("attack_trigger");
+                        hitTargets.Clear(); 
+                        animator.SetTrigger(attackTriggerName);
+                        
                     }
                     break;
                 case BoneState.Dead:
@@ -175,8 +200,23 @@ public class BoneController : MonoBehaviour,  IDamageable
             GameObject target = hit.collider.gameObject;
             if (!hitTargets.Contains(target))
             {
-                hitTargets.Add(target);
-                ApplyDamage(target, hit.point);
+                Vector3 attackDirection = (transform.position - player.transform.position).normalized;
+                float dot = Vector3.Dot(player.transform.forward, attackDirection);
+                if (playerAnimator.GetCurrentAnimatorStateInfo(0).IsTag("Block") && target.gameObject.layer == LayerMask.NameToLayer("Shield") && dot > 0.5f)
+                {
+                    playerAnimator.SetTrigger("block_hit_trigger");
+                    playerAudioSource.PlayOneShot(blockClip);
+                    hitTargets.Add(target);
+                    startDetectCollision = false;
+                    break;
+                }
+                else if (target.gameObject.layer == LayerMask.NameToLayer("Player"))
+                {               
+                    ApplyDamage(target, hit.point);
+                    hitTargets.Add(target);
+                    startDetectCollision = false;
+                    break;
+                }
             }
         }
     }
@@ -185,7 +225,7 @@ public class BoneController : MonoBehaviour,  IDamageable
         var damageable = target.GetComponent<IDamageable>();
         if (damageable != null)
         {
-            damageable.TakeDamage(10f);
+            damageable.TakeDamage(10f,transform);
         }
     }
     public void StartDetectCollision() 
@@ -196,4 +236,51 @@ public class BoneController : MonoBehaviour,  IDamageable
     {
         startDetectCollision = false;
     }
+    //平滑转向攻击者携程
+    IEnumerator SmoothLookAt(Vector3 targetPosition)
+    {
+        float elapsed = 0f;
+        float duration = 0.15f;
+        Quaternion startRotation = transform.rotation;
+        //计算水平方向
+        Vector3 direction = (targetPosition - transform.position).normalized;
+        direction.y = 0;
+        if (direction != Vector3.zero)
+        {
+            Quaternion targetRotation = Quaternion.LookRotation(direction);
+            while (elapsed < duration)
+            {
+                //平滑过渡，Quaternion.Slerp函数在两个旋转之间进行球面线性插值，返回一个新的旋转，第三个参数控制插值的程度，0返回startRotation，1返回targetRotation
+                transform.rotation = Quaternion.Slerp(startRotation, targetRotation, elapsed / duration);
+                //增量时间，逐渐增加elapsed的值，直到达到duration
+                elapsed += Time.deltaTime;
+                yield return null;
+            }
+            //确保最终旋转是目标旋转
+            transform.rotation = targetRotation;
+        }
+    }
+    public void PlayDeathSound() 
+    {
+        enemytAudioSource.PlayOneShot(deathClip);
+    }
+    public void PlayClip() 
+    {
+        if (animator.GetCurrentAnimatorStateInfo(0).IsName("BoneScream")) 
+        {
+            enemytAudioSource.PlayOneShot(screamClip,0.5f);
+        }
+        else if (animator.GetCurrentAnimatorStateInfo(0).IsTag("Attack")) 
+        {
+            enemytAudioSource.PlayOneShot(slashClip,0.3f);
+        }
+    }
+    public void StopClip() 
+    {
+        if (animator.GetCurrentAnimatorStateInfo(0).IsName("BoneScream"))
+        {
+            enemytAudioSource.Stop();
+        }
+    }
 }
+//
